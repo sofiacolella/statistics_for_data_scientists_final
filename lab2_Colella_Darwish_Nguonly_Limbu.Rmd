@@ -1,0 +1,1117 @@
+---
+title: "\\vspace{-1.5cm}Cocoa Mania: How much Cocoa is Good Cocoa?"
+header-includes:
+- \usepackage{fancyhdr}
+- \pagestyle{fancy}
+- \fancyhead[RO,RE]{Ethan Nguonly, Omar Darwish, Sagar Limbu, Sofia Colella}
+author: "Ethan Nguonly, Omar Darwish, Sagar Limbu, Sofia Colella"
+date: "December 8, 2021"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+geometry: "margin = 0.85in"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      eval = TRUE,
+                      warning = FALSE,
+                      fig.align = "center"
+                      )
+```
+
+```{r, package installations, message=FALSE, eval=FALSE}
+# install.packages("maps")
+# install.packages("ggExtra")
+# install.packages("textdata")
+# install.packages("tidytext")
+# install.packages("ggridges")
+# install.packages("sentimentr")
+#install.packages("ggwordcloud")
+#install.packages("polycor")
+#install.packages("ggcorrplot")
+```
+
+```{r initialize, include=FALSE, message=FALSE, eval=TRUE}
+library(tidyverse)
+library(ggplot2)
+require(maps)
+library(ggExtra)
+library(ggridges)
+library(grid)
+require(gridExtra)
+library(ggcorrplot)
+theme_set(theme_bw())
+
+library(sandwich)
+library(lmtest)
+library(stargazer)
+library(polycor)
+
+library(tidytext)
+library(textdata)
+library(stringr)
+library(ggwordcloud)
+library(sentimentr)
+
+```
+
+```{r functions, message=FALSE, eval=TRUE}
+lower_frame <- function(df){
+  df[sapply(df, is.character)] <- lapply(df[sapply(df,is.character)], tolower)
+  return(df)
+}
+
+upper_frame <- function(df){
+  df[sapply(df, is.character)] <- lapply(df[sapply(df,is.character)], toupper)
+  return(df)
+}
+
+get_frequency <- function(df){
+  names <- colnames(df)
+  df <- as.data.frame(table(df))
+  colnames(df) <- c(names, "freq")
+  
+  return(df %>% mutate_all(as.character) %>% mutate_all(as.numeric) %>% filter(freq > 0))
+}
+
+get_proportion <- function(df, target){
+  return(round(length(df[df == target])/length(df),3)*100)
+}
+
+get_robust_se <- function(model) { 
+  require(sandwich)
+  sqrt(diag(sandwich::vcovHC(model)))
+}
+```
+
+```{r loaddata, message=FALSE, eval=TRUE}
+raw <- read_csv("./chocolate.csv")
+```
+
+```{r, clean and split data, message=FALSE, eval=TRUE}
+#full data frame
+df_origin <- raw
+
+#make all strings lower case
+df_origin <- lower_frame(df_origin)
+
+#renaming vars
+df_origin <- df_origin %>% rename(company_country = company_location,
+                                  bean_country = country_of_bean_origin,
+                                  count_ingredients = counts_of_ingredients,
+)
+
+#Get world country data
+world_map <- upper_frame(map_data("world"))
+world_countries <- as.data.frame(unique(world_map$region))
+names(world_countries) <- c("region")
+world_countries_coord <- world_map %>%
+  select(region, lat, long) %>%
+  group_by(region) %>%
+  summarise(across(c(lat,long), mean))
+world_countries_coord <- upper_frame(world_countries_coord)
+
+##fix countries in dataset
+##only done once, hard coded into csv, don't uncomment.
+# 
+# df_origin <- df_origin %>%
+#   mutate(company_country_found = company_country %in% world_countries[,1],
+#          bean_country_found = bean_country %in% world_countries[,1])
+# countries_to_fix <- unique(c(unique(df_origin$company_country[!df_origin$company_country_found]),
+#                       unique(df_origin$bean_country[!df_origin$bean_country_found])))
+# 
+# country_mapping <- data.frame(original = countries_to_fix,
+#                               mapped = c("usa",
+#                                          "uk",
+#                                          "uk",
+#                                          "uk",
+#                                          "sao tome and principe",
+#                                          "saint lucia",
+#                                          "sao tome and principe",
+#                                          "saint vincent",
+#                                          "united arab emirates",
+#                                          "myanmar",
+#                                          "blend",
+#                                          "republic of congo",
+#                                          "usa",
+#                                          "bolivia",
+#                                          "indonesia",
+#                                          "sao tome and principe",
+#                                          "indonesia",
+#                                          "democratic republic of the congo"
+#                               ))
+# write.csv(country_mapping,"./country_mapping.csv", row.names = FALSE)
+# #countries to fix static
+
+country_mapping <- read_csv("./country_mapping.csv")
+country_continent <- read_csv("./continents.csv") %>% rename(region = Region,
+                                                             continent = Continent)
+df_origin <- df_origin %>% mutate(company_country =
+                                    plyr::mapvalues(company_country,
+                                                    country_mapping$original,
+                                                    country_mapping$mapped),
+                                  bean_country = 
+                                    plyr::mapvalues(bean_country,
+                                                    country_mapping$original,
+                                                    country_mapping$mapped)
+)
+#add lat/long of bean origin
+df_origin <- left_join(df_origin,
+                       lower_frame(world_countries_coord),
+                       by=c("bean_country" = "region")) %>%
+  rename(bean_country_long = long,
+         bean_country_lat = lat)
+
+#add continent of bean origin
+df_origin <- left_join(df_origin,
+                       country_continent,
+                       by=c("bean_country" = "region")) %>%
+  rename(bean_continent = continent)
+
+#add lat/long of company
+df_origin <- left_join(df_origin,
+                       lower_frame(world_countries_coord),
+                       by=c("company_country" = "region")) %>%
+  rename(company_country_long = long,
+         company_country_lat = lat)
+
+#add continent of company
+df_origin <- left_join(df_origin,
+                       country_continent,
+                       by=c("company_country" = "region")) %>%
+  rename(company_continent = continent)
+
+#add sentiment
+df_origin <- df_origin %>% mutate(text = paste(first_taste,
+                                               second_taste,
+                                               third_taste,
+                                               fourth_taste))
+
+df_origin$sentiment <- sentiment_by(df_origin$text)$ave_sentiment
+
+#mutate vars
+df_origin <- df_origin %>%
+  mutate(single_origin = case_when(bean_country != "blend" ~ "Single-Origin",
+                                   TRUE ~ "Blend"),
+         cocoa_butter = case_when(cocoa_butter ==  "have_cocoa_butter" ~ "With Cocoa-Butter",
+                                  TRUE ~ "Without Cocoa-Butter"),
+         vanilla = case_when(vanilla == "have_vanila" ~ "With Vanilla",
+                             TRUE ~ "Without Vanilla"),
+         lecithin = case_when(lecithin == "have_lecithin" ~ "With Lecithin",
+                              TRUE ~ "Without Lecithin"),
+         salt = case_when(salt == "have_salt" ~ "With Salt",
+                          TRUE ~ "Without Salt"),
+         sugar = case_when(sugar == "have_sugar" ~ "With Sugar",
+                           TRUE ~ "Without sugar"),
+         #original feature name is funny, is equivalent to have sweetener other than suagr
+         sweetner = case_when(sweetener_without_sugar == "have_sweetener_without_sugar" ~ "With Sweetener",
+                                             TRUE ~ "Without Sweetener"),
+         cocoa_percent = cocoa_percent / 100,
+         cocoa_percent_floored = floor(cocoa_percent*10)/10,
+         company = str_to_title(company),
+         company_continent = str_to_title(company_continent),
+         company_country = str_to_upper(company_country),
+         bean_continent = str_to_title(bean_continent),
+         bean_country = str_to_upper(bean_country),
+         text = str_replace_all(text, " NA", "")
+  )
+
+#drop redundant / unused features
+df_origin <- df_origin %>%select(-c(X1,
+                                    ref,
+                                    specific_bean_origin_or_bar_name,
+                                    beans,
+                                    first_taste,
+                                    second_taste,
+                                    third_taste,
+                                    fourth_taste,
+))
+
+#factorize columns
+df_origin[sapply(df_origin, is.character)] <- lapply(df_origin[sapply(df_origin, is.character)], as.factor)
+
+#reorded levels
+df_origin$company_continent <- factor(df_origin$company_continent,
+                                      levels = c("Blend",
+                                                "Africa",
+                                                "Asia",
+                                                "Europe",
+                                                "North America",
+                                                "Oceania",
+                                                "South America"))
+
+df_origin$bean_continent <- factor(df_origin$bean_continent,
+                                      levels = c("Blend",
+                                                "Africa",
+                                                "Asia",
+                                                "Europe",
+                                                "North America",
+                                                "Oceania",
+                                                "South America"))
+
+#split to train/validate
+set.seed(123)
+data_length <- nrow(df_origin)
+sample_size <- floor(data_length * 0.3)
+train_ids <- sample(seq_len(data_length), size = sample_size) 
+df <- df_origin[train_ids,]
+df_train <- df_origin[-train_ids,] 
+
+
+```
+
+\newpage
+
+# 1 Introduction
+Chocolate is enjoyed for all different types of occasions. Whether for a holiday, celebration, challenging time, or just as a sweet treat after dinner, chocolate continues to be one of the most popular candies in the world today. According to a study published by the National Confectioners Association (NCA) in 2019, chocolate represents 60% of the U.S. confectionery industry - a $35 billion market\footnote{National Confectioners Association (2019). Getting To Know Chocolate Consumers. https://candyusa.com}. We've all heard it, “chocolate makes everything better,” but not all chocolates are created equal! Consumers have different preferences. Some prefer a more dark, bitter chocolate, others prefer a sweeter chocolate with excess sugars added. Multiple components contribute to the taste of a chocolate bar, including the type and amount of ingredients, origin of cocoa beans, the blend, or the specific manufacturer. 
+
+Our data science team at Acme, the supermarket chain, has chosen to investigate a trendy premium category of chocolates: *dark*. According to FONA, a leading North-American flavorings manufacturer, consumer demand for dark chocolate has been steadily growing over the past decade, with 20% global growth since 2016\footnote{ https://www.fona.com/0821darkchocolate/}. Although many factors, such as advertising, sentiment, and pricing, can potentially affect consumer behavior towards a product, this report focuses on the chocolate bar composition and it's effect on overall product consumer ratings. We consider consumer rating to be a reliable proxy of the perceived value of the product, and a measure of product performance.
+
+Dark chocolate is chocolate consisting of cocoa butter, sugar, and typically at least 45% cocoa percentage. Cocoa percentage refers to how much of the bar, by weight, is made from pure cocoa beans. The amount of cocoa in dark chocolate bars usually varies from 50% for a sweeter dark chocolate to 90% for a much more intense, dark chocolate bar. The 2019 NCA study$^1$ highlights:*"Among consumers who prefer dark, or all chocolate types equally, 36 percent say that cacao percentage has a significant influence on their purchase. Among core fine chocolate consumers, 73 percent believe that cacao percentage is important."* Accordingly, our report focused on answering the question:
+
+\begin{quote}
+ \textit{To what extent does increasing cocoa percentage increase consumer ratings of chocolate bars?}
+\end{quote}
+
+The study leverages data from The Manhattan Chocolate Society\footnote{http://flavorsofcacao.com/}, a collective of fine chocolate connoisseurs based in New York. The society participates in research and tastings of chocolate to understand what factors are responsible for the taste experience of a chocolate bar whether they are due to specific growing regions, cacao genetics, manufacturer or other causes. The group has maintained a public database of over 2,000 standardized scorecards of chocolate tastings from 2006 to present. The chocolate bar samples are primarily focused on plain dark chocolate and are evaluated using a combination of both objective qualities and subjective interpretation. The data set also records relevant features such as cocoa percentage, bean origin, and ingredients. We note here that the respondents are mainly chocolate enthusiasts, which might affect the external validity of our study to the general consumer population at acme supermarkets. In addition, the group doesn't disclose demographics and/or rater identifiers which could have been used to estimate fixed effects. Additionally, missing such data makes it significantly harder to argue for IID data, which will be discussed in section 6 of the report.
+
+The primary motivation behind this report is to formalize the causal relationship between chocolate bar composition and consumer rating. Understanding and decomposing the principle components underlying this relationship can help guide our confectionery product selection and marketing team narrow the search scope for new products to introduce, and optimize the overall dark chocolate variety in acme stores.
+
+\newpage
+
+# 2 Research Design and Structural Model
+
+Our research leverages a structural equation model design to confirm the extent to which cocoa percentage, among other features, affects the self-reported consumer ratings of chocolate bars. Analyzing the available survey data within a theoretical structural framework enables us to draw causal conclusions from observational data.
+
+A systematic literature review conducted at the University of Bologna discusses multiple factors which affect consumer behavior around chocolate, including taste, form-factor, packaging, and others. The study cites: *"Taste ... remains the key factor influencing chocolate consumer behaviour"*\footnote{Prete, Del M. \& Samoggia, A. (2020). Chocolate Consumption and Purchasing Behaviour Review: Research Issues and Insights for Future Research}. Our model, shown in figure 1, groups factors into two categories: taste characteristics and non-taste characteristics. Taste characteristics, primarily results from composition (what goes into the bar), crafting/handling (how the bar was made, transported, stored ... etc). Since dark chocolate is primarily comprised of cocoa-beans, the effect of cocoa-percentage and the bean quality are highlighted. Other ingredients such as additives and flavorings, which make up a smaller percentage of the bar by weight, are lumped and will be considered as covartiates in the study. The effects of crafting and handling are also not considered in this study. Going from bean to bar is a fairly complex craft, the characteristics of which are beyond the scope of this report. We attempt to capture a fraction of the crafting effect by accounting for manufacturer / manufacturing region, nonetheless it is regarded as an omitted variable. Non-taste characteristics include features such as form factor, packaging, and size. These characteristics are not studied in this report and will be reported as omitted variables as well. The effects of omitted variables will be discussed in section 6.
+
+![Structural Model]("./src/img/struc_model_overall.png")
+
+The model presented in figure 1 presents a framework where compositions affects taste, and taste affects bar rating. Although theoretically taste could be empirically measured, perhaps by molecule composition, such approach is impractical at best. Hence, we chose to drop the intervening variable, taste, and model the direct causal relationship between the chocolate composition variables and the consumer rating. The model on the right panel of Figure 2 represents the structural model which is adopted as a framework for regression in the next sections. To the extent which we've researched and developed the structural model, we believe it satisfies the core SEM assumptions. That is for each linked x,y pairs, x precedes y, there is a relationship between x and y, and there are no confounding variables which affect both x and y.
+
+\newpage
+
+![Transforming to a one Equation Structural Model]("./src/img/struc_model_reg.png")
+
+We note here that the overarching concern would be to establish a causal pathway between the composition of a chocolate bar and it's performance as a product. As shown in figure 1, this can be established by drawing a proxy relationship between customer ratings and perceived value. Use of customer ratings to infer customer satisfaction and perceived value is common in the literature, a prime example of which is the American Customer Satisfaction Index methodology report, published by National Quality Research Center\footnote{National Quality Research Center (2008). ACSI Methodology Report. https://www.reginfo.gov/public/do/DownloadDocument?objectID=36702901}. It is also well established in modern economic theory that the perceived value of a product, among other factors such as advertisement and pricing, is a direct driver of its performance. Quantifying these effects is beyond the scope of this report.
+
+
+# 3 Data, Features, and Operationalization
+
+The data set used in this report is a collection of $2,224$ self-reported survey scorecards published and maintained by the Manhattan Chocolate Society.\footnote{http://flavorsofcacao.com/} A sample of the scorecard is provided in appendix A, noting that not all fields on the original survey questionnaire are readily available in the dataset. The table below summarizes the features of the dataset which were explored in this report:
+
+| Feature Group | Feature Name | Measure | Description                         |
+| :--------------:|:--------------:|:-------------:|:---------------------------------:|
+| Outcome | Rating | Ordinal | Overall rating by respondent (1:unpleasant, 5:outstanding), increments on 0.25
+| Outcome | Memorable Characteristics | Text | Keywords recording respondent experience around taste and texture
+| Predictor | Cocoa_Percent | Metric | Cocoa percentage by weight with 1 percentage point resolution.
+| Covartiate | Bean Country | Categorical | Country of bean origin
+| Covartiate | Count Ingredients | Integer | Count of ingredients in the bar
+| Covartiate | Cocoa-Butter | Binary | Presence of cocoa-butter as an ingredient
+| Covartiate | Vanilla | Binary | Presence of vanilla as an ingredient
+| Covartiate | Lecithin | Binary | Presence of lecithin, an emulsifier, as an ingredient
+| Covartiate | Salt | Binary | Presence of salt as an ingredient
+| Covartiate | Sugar | Binary | Presence of sugar as an ingredient
+| Covartiate | Sweet | Binary | Presence of sugar as an ingredient
+| Controls | Company    | Categorical | Name of bar manufacturer
+| Controls | Company Country | Categorical | Country of bar manufacturer
+| Controls | Review Year | Metric | Year at which review was made
+
+\newpage
+
+The following variables were mutated into the data set:
+
+| Feature Group | Mutant | Input Feature | Measure | Description        | Purpose          |
+| :--------------:|:-------------:|:---------------:|:-------------:|:--------------------:|:------------------:|
+| Outcome | Sentiment | Memorable Characteristics | Metric | Average sentiment polarity score using the syuzhet lexicon | Operationalize memorable characteristics
+| Covartiate | Bean Country Lat | Bean Country | Metric | Latitude of bean origin as reported on the maps R package | Retaining degrees of freedom
+| Covartiate | Bean Country Long | Bean Country | Metric | Longitude of bean origin as reported on the maps R package | Retaining degrees of freedom
+| Covartiate | Bean Continent | Bean Country | Categorical | Continent of bean origin | Retaining degrees of freedom
+| Covartiate | Single Origin | Bean Country | Binary | Are the cocoa beans from one country? | Retaining degrees of freedom
+| Controls | Company Country Lat | Company Country | Metric | Latitude of bean country as reported on the maps R package | Retaining degrees of freedom
+| Controls | Company Country Long | Company Country | Metric | Longitude of bean country as reported on the maps R package | Retaining degrees of freedom
+| Controls | Company Continent | Company Country | Categorical | Continent of company | Retaining degrees of freedom
+
+To perform exploratory data analysis, we randomly sampled 30% (n=667) of the observations using a uniform distribution. The remaining 70% (n=1557) will be used to estimate the model coefficients. This safeguards against over-fitting to the idiosyncrasies of our sample. We begin by investigating where are these chocolate bars manufactured. The figure below shows a heat map of manufacturer country of origin and a word cloud of manufacturing brands. We detect a clear over representation of North American based manufacturers, which is expected since the data collection is primarily U.S. based. In the following sections, we discuss each of the selected features.
+
+```{r, eval=TRUE,fig.height=4, fig.width=10, message=FALSE}
+#company countries
+freq_company_country <- as.data.frame(table(df$company_country)) %>%
+  arrange(desc(Freq))
+names(freq_company_country) <- c('region','freq')
+
+freq_company_country <- right_join(freq_company_country,
+                                   world_countries,
+                                   by = "region") %>%
+  replace_na(list(region = NA,
+                  freq = 0))
+
+map_company_country <- left_join(freq_company_country,
+                                 world_map,
+                                 by = "region")
+
+p1<- map_company_country %>% rename(frequency = freq) %>%
+  ggplot(aes(long, lat, group=group)) +
+  geom_polygon(aes(fill = frequency), color = "white") + 
+  scale_fill_gradient(low = "grey", high = "orangered2", na.value = NA) +
+  theme_minimal() +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.title = element_blank(),
+        legend.key.size = unit(10, "pt"),
+        legend.position = c(0.1, 0.5)
+  )
+
+#Company Names
+p2 <- as.data.frame(table(df$company)) %>%
+  mutate(angle = 90 * sample(c(0, 1), n(), replace = TRUE, prob = c(60, 40))) %>%
+  ggplot(aes(label=Var1, size=Freq, angle=angle)) +
+  geom_text_wordcloud(rm_outside = TRUE) +
+  scale_size_area(max_size = 13)
+
+grid.arrange(p1,p2,
+             ncol=2,
+             widths=c(6, 4),
+             top = "Over-representation of North American manufacturers"
+             )
+```
+\newpage
+
+## 3.1 Consumer ratings (Outcome Variable)
+
+Consumer rating is reported on an ordinal scale of 17 levels, 1-5 with 0.25 steps. We note that OLS imposes a metric scale over the outcome variable as coefficients estimate the rate-of-change of the conditional expectation of the LHS variable as a function of the RHS variables. Partial derivatives aren't meaningful quantities on the ordinal scale. The use of metric models on ordinal data might produce biased estimates. In the usual case an ordered probability model regression would've been the correct choice, nonetheless, given the scope of this class, we proceed with an OLS regression. We can argue that in the best case there exists a true continuous scale which underlies the consumer rating variable, and given the relatively large sample size we can expect the bias of each respondent's rating scale to average out to the true scale. **This claim is carried through the rest of this report**, the implications are discussed in section 6.
+
+The Figure below shows the distribution of ratings with an overlaid density plot estimating its underlying distribution. There is evidence of significant skewness towards lower values. Additionally, we note that although the feature's scale extends to 5, no values were recorded above 4, which calls into question the integrity of the reported scale.
+
+```{r, echo=FALSE, eval=TRUE, fig.height=3.4, fig.width = 10, message=FALSE}
+p1 <- df %>% 
+  ggplot(aes(x=rating)) +
+  geom_histogram( bins=length(unique(df$rating)),
+                  alpha=1,
+                  fill="orangered2")+
+  geom_density(aes(y=..density..*200),
+               fill="orangered4",
+               alpha = 0.5,
+               adjust=3) +
+  labs(x = "Bar Rating",
+       y = "Frequency"
+       )
+p2<-df %>%
+  ggplot() +
+  geom_qq(aes(sample=rating)) +
+  geom_qq_line(aes(sample=rating)) +
+  labs(x = "Normal Quantiles",
+       y = "Sample Quantiles"
+       )
+grid.arrange(p1,p2,
+             ncol=2,
+             top="Left skewed distribution of ratings")
+```
+
+## 3.2 Cocoa Percentage (Main Predictor)
+
+Cocoa-percentage, our main predictor, is measured on metric scale. The figure below shows the distribution, which is fairly symmetric. It's worthy to note that although the scale is continuous, certain percentages are more common than others. For example, 70% percentage accounted for 44% of the exploratory set while 69% and 71% accounted for 3% combined. The distribution also shows fairly heavy tails, nonetheless since the values are upper and lower bounded there is no concern of non-finite variances in the population.
+
+```{r, echo=FALSE, eval=TRUE, fig.height=3.4, fig.width = 10, message=FALSE}
+p1 <- df %>% 
+  ggplot(aes(x=cocoa_percent)) +
+  geom_histogram( bins=15,
+                  alpha=1,
+                  fill="orangered4")+
+  geom_density(aes(y=..density..*15),
+               fill="orangered2",
+               alpha = 0.4,
+               adjust=3) +
+  coord_cartesian(xlim = c(0.5,1)) +
+  labs(x = "Cocoa Percentage",
+       y = "Frequency")
+
+p2<-df %>%
+  ggplot(aes(sample=cocoa_percent)) +
+  geom_qq() + 
+  geom_qq_line() +
+  geom_text(aes(x=-1, y=0.75, label="Significant spike"),
+           color="red", 
+           size=3 ) +
+  annotate("rect", xmin=-1.2, xmax=0.5, ymin=0.68 , alpha=0, ymax=0.72, color="red") +
+  labs(x = "Normal Quantiles",
+       y = "Sample Quantiles"
+       )
+
+grid.arrange(p1,p2,
+             ncol=2,
+             top = "Symmetric cocoa % distribution exhibiting a spike at 70% and heavy tails"
+             )
+
+```
+
+\newpage
+
+## 3.3 Bean Origin
+
+Our structural model theorized a significant relationship between "cocoa bean characteristics" and the outcome variable. According to accounts of chocolate experts, cocoa bean characteristics are highly determined by genetics, nonetheless origin also plays an important role\footnote{https://perfectdailygrind.com/2018/07/fine-cacao-chocolate-origins-around-the-world/}. The dataset records the country of bean origin, and also indicates whether the cocoa beans are of single or blended origin. Hence, we operationalize cocoa bean characteristics with this feature. For blended origin beans, no country information is available, and this effect can't be measured effectively. Roughly 6% of the bars are crafted with a blended origin, the bar chart and wordclouds below show the distribution of bean origin for the remaining 94%.
+
+```{r, eval=TRUE,fig.height=2.5, fig.width = 10, message=FALSE}
+# bean origins
+freq_bean_conti <- as.data.frame(table(df$bean_continent)) %>%
+  arrange(desc(Freq))
+names(freq_bean_conti) <- c('region','freq')
+
+p1 <- freq_bean_conti %>%
+  ggplot(aes(x=reorder(region,-freq), y=freq)) +
+  geom_bar(stat="identity",fill="orangered2") +
+  theme(axis.text.x = element_text(angle = 30, hjust=1)) +
+  labs(y = "Frequency",
+       x = element_blank())
+
+p2 <- as.data.frame(table(df$bean_country)) %>%
+  #mutate(angle = 90 * sample(c(0, 1), n(), replace = TRUE, prob = c(60, 40))) %>%
+  ggplot(aes(label=Var1, size=Freq)) +
+  geom_text_wordcloud(rm_outside = TRUE) +
+  scale_size_area(max_size = 7)
+
+grid.arrange(p1,p2,
+             ncol=2,
+             widths=c(6, 4)
+             )
+```
+
+## 3.4 Ingredients
+
+Our structural model also theorizes a relationship between ingredients other than cocoa and the outcome variable.
+The data set contains binary indicators for the presence of 5 additional common ingredients, the proportions of which are shown in the below table. We note here that the data set lacks any information on the specific proportions of these ingredients, this limits our ability to accurately measure this relationship, and could potentially lead to type-1 errors as testing against a binary variable has higher statistical power. The correlation between these variables is discussed in section 4.5.
+
+| Ingredient      | % of Observations Containing Ingredient               |
+| :-------------: | :----------------------------------------------------:|
+| Cocoa Butter | `r get_proportion(df$cocoa_butter,"With Cocoa-Butter")`% |
+| Lecithin     | `r get_proportion(df$lecithin,"With Lecithin")`%         |
+| Salt         | `r get_proportion(df$salt,"With Salt")`%                 |
+| Sugar        | `r get_proportion(df$sugar,"With Sugar")`%               |
+| Sweetener    | `r get_proportion(df$sweetner,"With Sweetener")`%        |
+| Vanilla      | `r get_proportion(df$vanilla,"With Vanilla")`%           |
+
+
+## 3.5 Review Date
+
+The data set contains records dating back to 2006. Although our structural model doesn't account for any time effects we plan to include this feature as part of our control for potential fixed effects. The below histogram shows the count of observations for each year in our exploratory set.
+
+```{r, eval=TRUE,fig.height=2.5, fig.width=10, message=FALSE}
+df %>%
+  ggplot(aes(x=review_date)) +
+  geom_histogram(bins=length(unique(df$review_date)),fill="orangered4")+
+  labs(x = "Review Year",
+       y = "Count of Ratings"
+       ) 
+```
+
+\newpage
+
+
+
+
+# 4 Model Development
+
+Having inspected the marginal distributions of each our features, in this section we explore joint distributions between each of the predictors and the outcome variable to assess potential transformations and polynomial fits which might apply. In addition we investigate the joint distributions of our predictor variables to diagnose potential co-linearity.
+
+## 4.1 Primary Relationship (Cocoa-Percentage and Ratings)
+
+The primary relationship of interest in this report is cocoa-percentage and consumer ratings. The bubble plot below shows a fairly quadratic relationship, which we've highlighted with a least-squares fit. A clear potential outlier with 100% cocoa percentage is also highlighted.
+
+```{r, eval=TRUE, fig.height=4.2, fig.width=10, message=FALSE}
+#cocoa percent vs rating
+p1 <- get_frequency(df %>% select(cocoa_percent, rating)) %>% 
+  ggplot(aes(x=cocoa_percent, y=rating, size=freq)) +
+  geom_point(alpha=0.5, color="orangered2") +
+  stat_smooth(data= df %>% filter(cocoa_percent > 0.5 & cocoa_percent < 0.95),
+              method = "lm",
+              formula = y ~ x + I(x^2), size = 1,
+              color = "orangered4") +
+  coord_cartesian(xlim = c(0.5,1)) +
+  labs(title = "Primary study relationship: Observed quadratic relationship",
+       x = "Cocoa Percentage",
+       y = "Rating"
+       ) +
+  theme(legend.position = c(0.92, 0.85),
+        legend.key.size = unit(10, "pt"),
+        legend.title = element_blank()) +
+  coord_cartesian(ylim = c(0, 5),
+                  xlim = c(0.5,1)) +
+  geom_text(aes(x=1.0, y=2.0, label="Outlier?"),
+           color="red", 
+           size=3 ) +
+  annotate("rect", xmin=0.99, xmax=1.01, ymin=2.4, ymax=2.6, alpha=0, color="red")
+
+p1
+
+```
+
+The quadratic relationship can be further illustrated by plotting the distribution of rating conditioned on each cocoa percentage. After all, OLS is an estimated fit through the conditional expectations of the predicted variable. We reduce the resolution of cocoa percentage to a 5% scale by rounding in order to reduce noise. The red-lines represent the mean of the distribution. A fairly quadratic relationship is evident across the mean of the different distributions. We note that no conclusions can be directly drawn from the density curves that are produced, primarily due to the inherent ordinal structure of the variable. for example the 55% and 90% cocoa percentage plots are generated by only a handful of points. We attempt to illustrate the true distribution of data by overlaying a jittered scatter of the underlying data for each density curve.
+
+```{r fig.height=4.2, fig.width=10, message=FALSE, eval=TRUE}
+#rating ridges lumped
+p2 <- df %>% 
+  #filter(cocoa_percent > 0.57 & cocoa_percent < 0.83) %>%
+  ggplot(aes(x = rating,
+             y = factor(round(cocoa_percent/0.05)*0.05),
+             fill = factor(round(cocoa_percent/0.05)*0.05))
+         ) +
+  geom_density_ridges(jittered_points = TRUE,
+                      point_alpha = 1,
+                      point_shape = "o",
+                      quantile_lines = TRUE,
+                      quantiles = 2,
+                      vline_size = 2,
+                      vline_color = "red"
+                      ) +
+  scale_fill_brewer(palette = "Oranges") +
+  theme(legend.position = "none",
+        axis.title.y = element_blank()) +
+  labs(title = "Confrimation of quasi-quadratic relationship on conditional outcome mean",
+       y = "Cocoa Percentage",
+       x = "Rating"
+       ) +
+  coord_cartesian(xlim = c(1.5, 4.5))
+
+p2
+```
+
+\newpage
+
+## 4.2 Ingredients (Binary Covartiates)
+
+A significant proportion of the covartiates identified in section 3 are binary. We plot below the distribution of the outcome variable for each binary level. In addition we perform a two-sided Wilcox-Rank-Sum test to test whether the true difference in population means grouped by the binary covartiates is not equal to zero. The results of the tests are directly reported above each graph.
+
+```{r, fig.height=12, fig.width = 10, message=FALSE, eval=TRUE}
+global_theme <- theme_bw()
+                #theme(plot.title = element_text(size=8),
+                 #    plot.subtitle = element_text(size=5))
+global_y_lim <- 200
+bins <- length(unique(df$rating))
+
+#Binaries
+#sugar
+test <- wilcox.test(rating~sugar, data=df)
+t<-table(df$sugar)
+group_n = paste("n_with=",t[[1]],", n_without=",t[[2]],")",sep="")
+test_out <- case_when(test$p.value >0.05 ~ paste("fail to reject (p > 0.05, ", group_n, sep=""),
+                     test$p.value >0.01 ~ paste("reject (p < 0.05, ", group_n, sep=""),
+                     test$p.value >0.001 ~ paste("reject (p < 0.01, ", group_n, sep=""),
+                     TRUE ~ paste("reject (p < 0.001, ", group_n, sep="")
+                     )
+
+p1<- df %>% 
+  ggplot(aes(x=rating, fill=sugar, color=sugar)) +
+  geom_density(aes(y=..density..
+                   * max(as.data.frame(table(df$rating,df$sugar))$Freq),
+                   color=sugar),
+               alpha = 0.1,
+               adjust = 3
+               ) + 
+  geom_histogram(alpha = 0.5,
+                 position = "identity",
+                 bins=bins
+                 ) +
+  scale_color_manual(values=c("orangered1", "orangered4")) +
+  scale_fill_manual(values=c("orangered1", "orangered4")) +
+  coord_cartesian(xlim = c(1,4)) +
+  coord_cartesian(ylim=c(0,global_y_lim)) +
+  labs(title = "Sugar: inconclusive, skewed group size",
+       subtitle = paste("Two-side Wilcox Rank Sum test\nH0: populations have equal means:", test_out, sep = "\n"),
+       x = "Bar Rating",
+       y = "Frequency"
+       ) +
+  theme(legend.position = "bottom", legend.title = element_blank())
+
+#cocoa_butter
+test <- wilcox.test(rating~cocoa_butter, data=df)
+t<-table(df$cocoa_butter)
+group_n = paste("n_with=",t[[1]],", n_without=",t[[2]],")",sep="")
+test_out <- case_when(test$p.value >0.05 ~ paste("fail to reject (p > 0.05, ", group_n, sep=""),
+                     test$p.value >0.01 ~ paste("reject (p < 0.05, ", group_n, sep=""),
+                     test$p.value >0.001 ~ paste("reject (p < 0.01, ", group_n, sep=""),
+                     TRUE ~ paste("reject (p < 0.001, ", group_n, sep="")
+                     )
+p2<- df %>% 
+  ggplot(aes(x=rating, fill=cocoa_butter, color=cocoa_butter)) +
+  geom_density(aes(y=..density..
+                   * max(as.data.frame(table(df$rating,df$cocoa_butter))$Freq),
+                   color=cocoa_butter),
+               alpha = 0.1,
+               adjust = 3
+               ) + 
+  geom_histogram(alpha = 0.5,
+                 position = "identity",
+                 bins=bins
+                 ) +
+  scale_color_manual(values=c("orangered1", "orangered4")) +
+  scale_fill_manual(values=c("orangered1", "orangered4")) +
+  coord_cartesian(ylim=c(0,global_y_lim)) +
+  labs(title = "Cocoa-Butter: no significant effect",
+       subtitle = paste("Two-side Wilcox Rank Sum test\nH0: populations have equal means:", test_out, sep = "\n"),
+       x = "Bar Rating",
+       y = "Frequency"
+       ) +
+  theme(legend.position = "bottom", legend.title = element_blank())
+
+#vanilla
+test <- wilcox.test(rating~vanilla, data=df)
+t<-table(df$vanilla)
+group_n = paste("n_with=",t[[1]],", n_without=",t[[2]],")",sep="")
+test_out <- case_when(test$p.value >0.05 ~ paste("fail to reject (p > 0.05, ", group_n, sep=""),
+                     test$p.value >0.01 ~ paste("reject (p < 0.05, ", group_n, sep=""),
+                     test$p.value >0.001 ~ paste("reject (p < 0.01, ", group_n, sep=""),
+                     TRUE ~ paste("reject (p < 0.001, ", group_n, sep="")
+                     )
+p3<-df %>% 
+  ggplot(aes(x=rating, fill=vanilla, color=vanilla)) +
+  geom_density(aes(y=..density..
+                   * max(as.data.frame(table(df$rating,df$vanilla))$Freq),
+                   color=vanilla),
+               alpha = 0.1,
+               adjust = 3
+               ) + 
+  geom_histogram(alpha = 0.5,
+                 position="identity",
+                 bins=bins
+                 ) +
+  scale_color_manual(values=c("orangered1", "orangered4")) +
+  scale_fill_manual(values=c("orangered1", "orangered4")) +
+  labs(title = "Vanilla: lower mean rating",
+       subtitle = paste("Two-side Wilcox Rank Sum test\nH0: populations have equal means:", test_out, sep = "\n"),
+       x = "Bar Rating",
+       y = "Frequency") +
+  coord_cartesian(ylim=c(0,global_y_lim)) +
+  theme(legend.position = "bottom", legend.title = element_blank())
+
+#lecithin
+test <- wilcox.test(rating~lecithin, data=df)
+t<-table(df$lecithin)
+group_n = paste("n_with=",t[[1]],", n_without=",t[[2]],")",sep="")
+test_out <- case_when(test$p.value >0.05 ~ paste("fail to reject (p > 0.05, ", group_n, sep=""),
+                     test$p.value >0.01 ~ paste("reject (p < 0.05, ", group_n, sep=""),
+                     test$p.value >0.001 ~ paste("reject (p < 0.01, ", group_n, sep=""),
+                     TRUE ~ paste("reject (p < 0.001, ", group_n, sep="")
+                     )
+p4<-df %>% 
+  ggplot(aes(x=rating, fill=lecithin, color=lecithin)) +
+  geom_density(aes(y=..density..
+                   * max(as.data.frame(table(df$rating,df$lecithin))$Freq),
+                   color=lecithin),
+               alpha = 0.1,
+               adjust = 3
+               ) + 
+  geom_histogram(alpha = 0.5,
+                 position = "identity",
+                 bins=bins
+                 ) +
+  scale_color_manual(values=c("orangered1", "orangered4")) +
+  scale_fill_manual(values=c("orangered1", "orangered4")) +
+  labs(title = "Lecithin: lower mean rating",
+       subtitle = paste("Two-side Wilcox Rank Sum test\nH0: populations have equal means:", test_out, sep = "\n"),
+       x = "Bar Rating",
+       y = "Frequency") +
+  coord_cartesian(ylim=c(0,global_y_lim)) +
+  theme(legend.position = "bottom", legend.title = element_blank())
+
+#salt
+test <- wilcox.test(rating~salt, data=df)
+t<-table(df$salt)
+group_n = paste("n_with=",t[[1]],", n_without=",t[[2]],")",sep="")
+test_out <- case_when(test$p.value >0.05 ~ paste("fail to reject (p > 0.05, ", group_n, sep=""),
+                     test$p.value >0.01 ~ paste("reject (p < 0.05, ", group_n, sep=""),
+                     test$p.value >0.001 ~ paste("reject (p < 0.01, ", group_n, sep=""),
+                     TRUE ~ paste("reject (p < 0.001, ", group_n, sep="")
+                     )
+p5<-df %>% 
+  ggplot(aes(x=rating, fill=salt, color = salt)) +
+  geom_density(aes(y=..density..
+                   * max(as.data.frame(table(df$rating,df$salt))$Freq),
+                   color=salt),
+               alpha = 0.1,
+               adjust = 3) + 
+  geom_histogram(alpha = 0.5,
+                 position = "identity",
+                 bins=bins
+                 ) +
+  scale_color_manual(values=c("orangered1", "orangered4")) +
+  scale_fill_manual(values=c("orangered1", "orangered4")) +
+  labs(title = "Salt: inconclusive, skewed group size",
+       subtitle = paste("Two-side Wilcox Rank Sum test\nH0: populations have equal means:", test_out, sep = "\n"),
+       x = "Bar Rating",
+       y = "Frequency") +
+  coord_cartesian(ylim=c(0,global_y_lim)) +
+  theme(legend.position = "bottom", legend.title = element_blank())
+
+#single origin
+test <- wilcox.test(rating~sweetner, data=df)
+t<-table(df$sweetner)
+group_n = paste("n_with=",t[[1]],", n_without=",t[[2]],")",sep="")
+test_out <- case_when(test$p.value >0.05 ~ paste("fail to reject (p > 0.05, ", group_n, sep=""),
+                     test$p.value >0.01 ~ paste("reject (p < 0.05, ", group_n, sep=""),
+                     test$p.value >0.001 ~ paste("reject (p < 0.01, ", group_n, sep=""),
+                     TRUE ~ paste("reject (p < 0.001, ", group_n, sep="")
+                     )
+p6<-df %>% 
+  ggplot(aes(x=rating, fill=sweetner, color=sweetner)) +
+  geom_density(aes(y=..density..
+                   * max(as.data.frame(table(df$rating,df$sweetner))$Freq),
+                   color=sweetner),
+               alpha = 0.1,
+               adjust = 3
+               ) + 
+  geom_histogram(alpha = 0.5,
+                 position = "identity",
+                 bins = bins
+                 ) +
+  scale_color_manual(values=c("orangered1", "orangered4")) +
+  scale_fill_manual(values=c("orangered1", "orangered4")) +
+  labs(title = "Sweetener: inconclusive, skewed group size",
+       subtitle = paste("Two-side Wilcox Rank Sum test\nH0: populations have equal means:", test_out, sep = "\n"),
+       x = "Bar Rating",
+       y = "Frequency") +
+  coord_cartesian(ylim=c(0,global_y_lim)) +
+  theme(legend.position = "bottom", legend.title = element_blank())
+
+grid.arrange(p4, p3, p2, p6, p1, p5,
+             ncol=2
+             )
+```
+
+\newpage 
+
+## 4.3 Bean Origin
+
+As discussed in section 3, bean origin is a relatively important covartiate as it operationalizes bean characteristics in our causal model. In the exploratory set alone, there are `r length(unique(df$bean_country))` unique country bean origins, with a median of `r median(table(df$bean_country))` observations per bean origin. Regressing against such factor sizes would yield significantly biased estimate. Accordingly, we investigate two approaches to compressing the information. The first approach maps each bean origin to it's continent, effectively reducing the factor levels to 7, with a median of `r median(table(df$bean_continent))` observations per level. The second approach maps each bean origin to it's latitude/longitude, enabling us to leverage a metric predictor. We note that encoding using the latitude/longitude approach directly omits observations which are of a blended origin. Both approaches are plotted below, yielding little to no observed effect.
+\
+
+```{r, fig.height=10, fig.width = 10, message=FALSE, eval=TRUE}
+#bean continent
+p1<-df %>% 
+  ggplot(aes(x = rating,
+             y = factor(bean_continent),
+             fill = factor(bean_continent))
+         ) +
+  geom_density_ridges(jittered_points = TRUE,
+                      point_alpha = 1,
+                      point_shape = "o",
+                      quantile_lines = TRUE,
+                      quantiles = 2,
+                      vline_size = 1.5,
+                      vline_color = "red",
+                      scale = 0.9) +
+  scale_fill_brewer(palette = "Oranges") +
+  labs(title = "Bean Origin Continent: observed slightly lower mean for africa/blend origins",
+       y = "Bean Origin Continent",
+       x = "Rating"
+       ) +
+  theme(legend.position = "none",
+        axis.title.y = element_blank())
+
+#bean latitude
+p2<-get_frequency(df %>% select(bean_country_lat, rating)) %>%
+  ggplot(aes(x=bean_country_lat, y=rating, size=freq)) +
+  geom_point(alpha=0.5,
+             color = "orangered2") +
+  stat_smooth(method = "lm", formula = y ~ x, size = 1, color="orangered4") +
+  coord_cartesian(ylim = c(1,4)) +
+  labs(title = "Bean origin latitude\nno significant correlation",
+       x = "Bean Origin Latitude",
+       y = "Rating"
+       ) +
+  theme(legend.position = c(0.92, 0.15),
+        legend.key.size = unit(10, "pt"),
+        legend.title = element_blank())
+
+#bean longitude
+p3<-get_frequency(df %>% select(bean_country_long, rating)) %>%
+  ggplot(aes(x=bean_country_long, y=rating, size=freq)) +
+  geom_point(alpha=0.5,
+             color="orangered4") +
+  stat_smooth(method = "lm", formula = y ~ x, size = 1, color="orangered2") +
+  labs(title = "Bean origin longtitude\nslightly positive effect for higher longtitudes",
+       x = "Bean Origin Longtitude",
+       y = "Rating"
+       ) +
+  theme(legend.position = c(0.92, 0.15),
+        legend.key.size = unit(10, "pt"),
+        legend.title = element_blank())
+
+grid.arrange(p1,grid.arrange(p3,p2,ncol=2),ncol=1)
+```
+
+\newpage
+
+## 4.4 Other covartiates and controls
+
+In this section we explore the remaining potential covartiates including ones which don't have a direct analogue in the structural model yet act as controls or fixed effect estimators.
+
+### 4.4.1 Ingredient Counts
+
+We haven't stressed the importance to this feature as it is expected to have a high co-linear relationship with the ingredient binaries discussed in section 4.2, which will be investigated in section 4.5. Nonetheless, we plot below the conditional distributions of the outcome variable against ingredient counts.
+
+```{r, fig.height=2.7, fig.width = 4, eval=TRUE, message=FALSE, echo=FALSE, warning=FALSE, dpi=800}
+p1<-df %>% 
+  ggplot(aes(x = rating,
+             y = factor(count_ingredients),
+             fill = factor(count_ingredients))
+         ) +
+  geom_density_ridges(jittered_points = TRUE,
+                      point_alpha = 1,
+                      point_shape = "o",
+                      quantile_lines = TRUE,
+                      quantiles = 2,
+                      vline_size = 1.5,
+                      vline_color = "red",
+                      scale = 0.9) +
+  scale_fill_brewer(palette = "Oranges") +
+  labs(title = "Ingredient Count: observed negative correlation",
+       y = "Count of ingredients in chocolate bar",
+       x = "Rating"
+       ) +
+  theme(legend.position = "none",
+        axis.title.y = element_blank())
+p1
+```
+
+### 4.4.2 Manufacturer & Manufacturing Region
+
+We follow a similar approach to 4.4.1 to account for fixed effects by manufacturer, due to the relatively high categorical count. We consider each manufacturer's country and proceed to encode the information by coordinates or by continent, the plots for both are shown below. The metric encoding with longitude and latitude doesn't show any significant effect of manufacturer location, grouping by continent however shows a slight decrease in conditional mean of rating for African and South American crafters.
+
+```{r, fig.height=5.2, fig.width = 10, message=FALSE, eval=TRUE}
+#Manufacturer continent
+p1<-df %>% 
+  ggplot(aes(x = rating,
+             y = factor(company_continent),
+             fill = factor(company_continent))
+         ) +
+  geom_density_ridges(jittered_points = TRUE,
+                      point_alpha = 1,
+                      point_shape = "o",
+                      quantile_lines = TRUE,
+                      quantiles = 2,
+                      vline_size = 1.5,
+                      vline_color = "red",
+                      scale = 0.9) +
+  scale_fill_brewer(palette = "Oranges") +
+  labs(title = "Lower mean for African & South American manufacturers",
+       y = "Manufacturer Continent",
+       x = "Rating"
+       ) +
+  theme(legend.position = "none",
+        axis.title.y = element_blank())
+
+#Manufacturer latitude
+p2<-get_frequency(df %>% select(company_country_lat, rating)) %>%
+  ggplot(aes(x=company_country_lat, y=rating, size=freq)) +
+  geom_point(alpha=0.5,
+             color = "orangered2") +
+  stat_smooth(method = "lm", formula = y ~ x, size = 1, color="orangered4") +
+  coord_cartesian(ylim = c(1,4)) +
+  labs(title = "Manufacturer latitude: no observed effect",
+       x = "Manufacturer Latitude",
+       y = "Rating"
+       ) +
+  theme(legend.position = c(0.92, 0.2),
+        legend.key.size = unit(10, "pt"),
+        legend.title = element_blank())
+
+#Manufacturer longitude
+p3<-get_frequency(df %>% select(company_country_long, rating)) %>%
+  ggplot(aes(x=company_country_long, y=rating, size=freq)) +
+  geom_point(alpha=0.5,
+             color="orangered4") +
+  stat_smooth(method = "lm", formula = y ~ x, size = 1, color="orangered2") +
+  labs(title = "Manufacturer longtitude: no observed effect",
+       x = "Manufacturer Longtitude",
+       y = "Rating"
+       ) +
+  theme(legend.position = c(0.92, 0.2),
+        legend.key.size = unit(10, "pt"),
+        legend.title = element_blank())
+
+grid.arrange(p3,p2,p1,ncol=2)
+```
+
+\newpage
+
+## 4.5 Correlations among predictors
+
+It is important to account for correlation among predicting variables as to reduce multi-collinearity and assure that the covartiates are not absorbing significant causal power from our main predictors. Using the polycorr package, we compute correlation coefficients based on pearson for metric-metric, polyserial for metric-ordinal, and polychoric for ordinal-ordinal. We observe a high co-linearity between several predictors, which will be taken into account in the model specification. Namely, a perfect linear relationship between the presence of sugar and sweeteners, conditioning on having no sugar more than 99.8% of the sample contained sweetener. This leads us to choose one of the two in our regression. We note here that these correlation coefficients must only be acted upon along with the associated p-values of and standard error estimates due to the potential presence of skewed group sizes. Apart from model specification we leave it up to the reader to explore the correlation trends and their interesting meanings.
+
+```{r, fig.height=10, fig.width=10, eval=TRUE}
+df_corr <- df%>% select(cocoa_percent,
+                        bean_continent,
+                        cocoa_butter,
+                        lecithin,
+                        salt,
+                        sugar,
+                        sweetner,
+                        vanilla,
+                        count_ingredients,
+                        company_continent)
+
+corr <- polycor::hetcor(df_corr)
+corr_mat <- corr$correlations
+corr_mat[is.na(corr_mat)] <- 0
+
+ggcorrplot(corr_mat,
+           type = "lower",
+           outline.col = "white",
+           hc.order = TRUE,
+           lab = TRUE)
+```
+
+\newpage
+
+# 5 Model Specification & Regression Results
+
+Based on the developed structural model and the exploratory data analysis conducted, and having conducted multiple anova trials for selection across correlated predictors, we specify the following nested models to be fitted:
+
+$$
+\begin{aligned}
+& Rating = \\
+& \beta_0 + \beta_1 Cocoa_\% + \beta_2 Cocoa_\%^2 \ \ \text{(Base)} \\
+& \\
+& \beta_0 + \beta_1 Cocoa_\% + \beta_2 Cocoa_\%^2 + \beta_3Vanilla+ \beta_4Sugar \ \text{(Add Ingredients)}\\
+& \\
+& \beta_0 + \beta_1 Cocoa_\% + \beta_2 Cocoa_\%^2 + \beta_3Vanilla + \beta_4Sugar + \beta_{5-11}BeanContinent \ \text{(Add Bean Effects)}\\
+& \\
+& \beta_0 + \beta_1 Cocoa_\% + \beta_2 Cocoa_\%^2 + \beta_3Vanilla + \beta_4Sugar + \beta_{5-10}BeanContinent \\
+& \ \ \ \ \ \ \ \ + \beta_{11-16}CompanyContinent + \beta_{17}ReviewDate \ \text{(Add Controls)}\\
+\end{aligned}
+$$
+```{r, models, echo=FALSE, warning=FALSE,  message=FALSE, eval=TRUE, results="asis"}
+df_reg <- df_train %>%
+ filter(cocoa_percent >= 0.5 & cocoa_percent <= 0.95 ) #outliers accounting for only 7 observations
+
+mod_noise <- lm(rating ~ 1, 
+                data=df_reg) 
+
+mod_cocoa <- lm(rating ~ 1
+               + cocoa_percent
+               + I(cocoa_percent^2), 
+               data=df_reg)
+
+mod_ingredients <- lm(rating ~ 1
+                          + cocoa_percent 
+                          + I(cocoa_percent^2)
+                          + vanilla
+                          + sugar,
+                          data=df_reg)
+
+mod_bean <- lm(rating ~ 1
+                          + cocoa_percent 
+                          + I(cocoa_percent^2)
+                          + vanilla
+                          + sugar
+                          + bean_continent,
+                          data=df_reg %>% filter(single_origin != "blend"))
+
+mod_controls <- lm(rating ~ 1
+                       + cocoa_percent 
+                       + I(cocoa_percent^2)
+                       + vanilla
+                       + sugar
+                       + bean_continent
+                       + company_continent
+                       + review_date,
+                       data=df_reg)
+stargazer(mod_noise,
+          mod_cocoa,
+          mod_ingredients,
+          mod_bean,
+          mod_controls,
+          type="latex",
+          font.size = "tiny",
+          column.labels = c("Noise", "Base", "Ingredients", "Beans", "Controls"),
+          se = list(get_robust_se(mod_noise),
+                    get_robust_se(mod_cocoa),
+                    get_robust_se(mod_ingredients),
+                    get_robust_se(mod_bean),
+                    get_robust_se(mod_controls)
+                    ),
+          title= "OLS Regression Models",
+          model.numbers = FALSE,
+          dep.var.labels = "Conumser Chocolate Ratings",
+          covariate.labels = c("Cocoa percent",
+                               "Cocoa percent uad",
+                               "Without Vanilla",
+                               "Without Sugar",
+                               "African Beans",
+                               "Asian Beans",
+                               "N. American Beans",
+                               "Oceanic Beans",
+                               "S. American Beans",
+                               "Asian Crafter",
+                               "European Crafter",
+                               "N. American Crafter",
+                               "Oceanic Craffer",
+                               "S. American Crafter",
+                               "Date of Review"
+                               )
+          
+          )
+```
+
+\newpage
+
+# 6 Assumptions and Limitatons
+
+## 6.1 Statistical
+
+### 6.1.1 OLS and Ordinal Outcomes
+The most important statistical limitation to be addressed is the use of OLS for an ordinal predicted variable. It has been shown in the literature that analysis of ordinal data with metric models can increase type-1 and type-2 errors as well as distorted effect-size estimate depending on the segmentation of intervals and their true location on the imposed distribution\footnote{T M. Liddell, J K. Kruschke (2018). Analyzing ordinal data with metric models: What could possibly go wrong? Journal of Experimental Social Psychology}. Specifically for likert scale data in consumer behaviour contexts, an article in the International Journal of commerce and management concluded: *"the use of OLS for ordered categorical data gives misleading results and produces biased estimates, leading to inaccurate hypothesis testing*\footnote{Peel, M.J., Goode, M.M.H. and Moutinho, L.A. (1998), Estimating Consumer Satisfaction: OLS Versus Ordered Probability Models, International Journal of Commerce and Management}.
+
+### 6.1.2 IID Data
+
+The data used in the model does not meet the IID assumption. The target variable, ratings of the chocolate products are collected from self reported enthusiast We cannot assume that each rating comes from different reviewer, and can't discern whether there were significant leak effects between samples. Potential implications of violating the IID assumption are unreliable standard error estimated.
+
+### 6.1.3 Linear Conditional Expectation
+
+We expect the average of our target variable to be the linear function of our predictor variable. As we know the higher the r-squared value then there is a better linear fit. Our regression table shows a relatively low r-squared value, nonetheless the fitted vs. residual plot shows a fairly distributed cloud around zero. The  patterns which appear are mainly due to the ordinal nature of the variable. Additionally, because we have a large sample size on the order of 1,500, this assumption is not needed for consistently estimating the BLP.
+
+```{r, fig.height=4}
+plot(mod_controls, which = 1)
+```
+
+### 6.1.4 Normally Distributed Errors
+
+Given the large sample size we don't need to impose any underlying distribution for our errors, we can rely on asymptotics and the central limit theorem.
+
+\newpage
+
+### 6.1.5  Homoskedastic Errors
+
+The plot of standardized residuals vs. fitted values below is suggestive of hetroskedastic errors. A clear fanning pattern of the residuals around the mean line is observed as the outcome variable increases.  Given the sufficiently large sample data n > 1000, we don't expect hetroskedasticity to be a problem, especially since we are using robust standard errors.
+
+```{r, fig.height=4}
+plot(mod_controls, which = 3)
+```
+
+### 6.1.6 No Perfect Collinearity
+
+We have designed our feature-set so that no perfect co-linear predictors are regressed together for any of our models.
+
+## 6.2 Structural
+
+In section 2 of the report we formalize a structural model and have identified two main omitted variables which might result in significant bias for our OLS estimates.
+
+First is crafting and handling. The process of crafting cocoa beans to chocolate varies between manufacturers. The versatility within each stage of the craft process  can have a drastic effect on both the outcome variable and our predicted outcome. The growing conditions, roasting, and fermenting are one of the major ways in which chocolate makers determine the flavor and quality of chocolate. Properly crafting cocoa throughout its journey will overall increase the quality of the bar and have a positive impact on consumer ratings. In addition we can assume that the finer chocolate beans are purchased and processed by more skillful crafter, this double positive effect is indicative an omitted variable bias away form zero.
+
+Second is non-taste characteristics such as packaging and form-factor. The perceived quality of the product before it's tasted can result in a form of confirmation bias which would lead to an inflated experience for the same quality/taste of chocolate. One can assume here again, that the more sophisticated a chocolate crafter is, the more he or she is able to employ such techniques in order to increase the perceived value of his or her product. Hence, this omitted variable has a positive effect on both on taste, our intervening variable, and consumer rating resulting in an additional omitted variable bias away from zero.
+
+\newpage
+
+# 7 Conclusions and Recommendations
+
+Our study found that there was a weak, yet measurable and statistically significant cause-effect relationship between cocoa percentage and chocolate bar ratings. As cocoa percentage increases, there is not a uni-directional linear correlation, instead, the observed relationship is quadratic in nature with a vertex around 65% - 75% of cocoa percentage. This is in line with other previous studies conducted around consumer behavior and dark chocolate, namely the consumer survey report which was published by the National Confectioners Association, which highlights: *"Most consumers look for cacao shares between 66 and 80 percent, with core fine chocolate consumers leaning toward the higher cacao shares."*\footnote{National Confectioners Association (2019). Getting To Know Chocolate Consumers. https://candyusa.com}.  In addition, interestingly, we found that the presence of vanilla flavorings has a negative over all effect, ranging between -0.18 to -0.19 on the rating scale. Moreover the regression coefficients suggest that the absence of sugar and/or the presence of sweeteners has a significant negative impact on the overall rating. We we're unable to separate these effects due to the perfect co-linearity of the two features in the data.
+
+The low R^2 value can be attributed to many factors including the inherent ordinal measure of the projected variable, the presence of an intervening variable which mediates the causal affect, and the fact that a structural model was imposed on top of observational data. That shouldn't be discouraging, as the results are still statistically significant. In order to further investigate the causal relationship we recommend allocating funds for a randomized experiment conducted at acme stores, the foundations of which will be built on the findings in this report.
+
+\newpage
+
+# Appendix A - Manhattan Chocolate Society Survey
+
+![]("./src/img/survey.png")
